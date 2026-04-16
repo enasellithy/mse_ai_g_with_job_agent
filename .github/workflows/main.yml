@@ -1,0 +1,28 @@
+name: AI Job Search Agent (Every 6 Hours)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' 
+  workflow_dispatch: 
+jobs:
+  run-search-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install google-generativeai requests playwright beautifulsoup4
+          playwright install chromium
+
+      - name: Execute Agent
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_URL: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python agent_main.py
