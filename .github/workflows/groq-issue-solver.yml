@@ -1,0 +1,91 @@
+name: Groq Auto Solver - Composer Fix
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  solve-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Python Dependencies
+        run: pip install openai PyGithub gitpython
+
+      - name: Run AI Solver with Composer Sync
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          python << 'EOF'
+          import os, openai, git, re
+          from github import Github, Auth
+
+          auth = Auth.Token(os.environ['GITHUB_TOKEN'])
+          g = Github(auth=auth)
+          repo = g.get_repo(os.environ['REPO_NAME'])
+          
+          issues = [i for i in repo.get_issues(state='open') if not i.pull_request]
+          if not issues: exit(0)
+
+          client = openai.OpenAI(api_key=os.environ['GROQ_API_KEY'], base_url="https://api.groq.com/openai/v1")
+          repo_local = git.Repo(".")
+          
+          for issue in issues:
+              branch_name = f"fix/composer-sync-{issue.number}"
+              repo_local.git.checkout(repo.default_branch)
+              repo_local.git.checkout('-b', branch_name)
+
+              with open("composer.json", "r") as f:
+                  composer_content = f.read()
+
+              prompt = f"Fix composer.json issue: {issue.body}\nCurrent content:\n{composer_content}\nOutput format:\nFILE: composer.json\nCODE: ```json\n(content)\n```"
+
+              response = client.chat.completions.create(
+                  model="llama-3.3-70b-versatile",
+                  messages=[{"role": "user", "content": prompt}]
+              )
+              
+              output = response.choices[0].message.content
+              match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
+              
+              if match:
+                  new_json = match.group(1).strip()
+                  with open("composer.json", "w") as f:
+                      f.write(new_json)
+                  
+                  print("Running composer update to sync lock file...")
+                  os.system("composer update --no-scripts --no-interaction")
+
+                  repo_local.git.add("composer.json", "composer.lock")
+                  repo_local.config_writer().set_value("user", "name", "AI Bot").release()
+                  repo_local.config_writer().set_value("user", "email", "bot@github.com").release()
+                  repo_local.git.commit("-m", f"Fix composer synchronization for #{issue.number}")
+                  
+                  remote_url = f"https://x-access-token:{os.environ['GITHUB_TOKEN']}@github.com/{os.environ['REPO_NAME']}.git"
+                  origin = repo_local.remote(name='origin')
+                  origin.set_url(remote_url)
+                  repo_local.git.push('origin', branch_name, force=True)
+
+                  repo.create_pull(
+                      title=f"🛠 Composer Fix for #{issue.number}",
+                      body=f"Synced composer.json and composer.lock.\n\nCloses #{issue.number}",
+                      head=branch_name,
+                      base=repo.default_branch
+                  )
+          EOF
